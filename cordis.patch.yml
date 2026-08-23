@@ -1,0 +1,12 @@
+# dsh-ltm-gate bundle patch: hard LTM recall gate for the web profile.
+# One host row; the row name resolves from the profile's own node_modules
+# (installed as a file: dependency).
+- insert:
+    - id: ltm-gate
+      name: 'dsh-ltm-gate'
+      config:
+        serverName: ltm
+        recallTools: [get_recent_memories]
+        allowTools: [todo_write, ask_user_question]
+        openAfterFailedRecalls: 3
+        prompt: full

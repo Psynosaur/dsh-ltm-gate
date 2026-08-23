@@ -1,0 +1,21 @@
+{
+  "name": "dsh-ltm-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hard LTM recall gate for DeepSeek Harness: blocks non-LTM tool calls until a memory recall succeeds in the session.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-llm": "*"
+  }
+}

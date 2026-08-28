@@ -15,7 +15,7 @@ writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
 copyFileSync(SRC, join(dir, "index.js"));
 
 const mod = await import(pathToFileURL(join(dir, "index.js")).href);
-const { apply, sanitizeProject } = mod;
+const { apply, sanitizeProject, verbatimSummary, compactMemoryTitle } = mod;
 
 function makeAgent() {
   const events = [];
@@ -27,12 +27,40 @@ function makeAgent() {
     },
   };
 }
-function makeCtx() {
+function makeCtx(options = {}) {
   const listeners = {};
   const sections = [];
   const commands = [];
+  const remembered = [];
+  // storeCompactMemory does initialize -> tools/call via fetch (bypasses
+  // ToolRuntime Code Mode collapse). Stub fetch to handle both calls.
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    let body;
+    try { body = JSON.parse(init && init.body ? init.body : "{}"); } catch { body = {}; }
+    if (body.method === "initialize") {
+      return {
+        ok: true,
+        headers: { get: (h) => h === "mcp-session-id" ? "smoke-session-123" : "application/json" },
+        text: async () => JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2024-11-05" } }),
+      };
+    }
+    if (body.method === "tools/call" && body.params && body.params.name === "remember") {
+      remembered.push(body.params.arguments);
+      return {
+        ok: true,
+        headers: { get: (h) => h === "mcp-session-id" ? "smoke-session-123" : "application/json" },
+        text: async () => JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [], isError: false } }),
+      };
+    }
+    return { ok: false, status: 400, headers: { get: () => null }, text: async () => "unexpected" };
+  };
+  const toolsStub = options.tools ?? {
+    get(name) { return undefined; },
+  };
   return {
     logger: { warn: () => {} },
+    tools: toolsStub,
     on(name, fn) { (listeners[name] ??= []).push(fn); },
     systemPrompt: { section(s) { sections.push(s); } },
     inject(keys, fn) { fn({ commands: { register(c) { commands.push(c); } } }); },
@@ -45,6 +73,8 @@ function makeCtx() {
     },
     _sections: sections,
     _commands: commands,
+    _remembered: remembered,
+    _restoreFetch: () => { globalThis.fetch = origFetch; },
   };
 }
 
@@ -132,6 +162,86 @@ ok(sanitizeProject("") === "unknown", "sanitizeProject empty -> unknown");
   let threw2 = false;
   try { apply(makeCtx(), { openAfterFailedRecalls: 0 }); } catch { threw2 = true; }
   ok(threw2, "S3 openAfterFailedRecalls < 1 rejected");
+}
+
+ok(verbatimSummary([{ type: "text", text: "hello" }, { type: "reasoning", text: "skip" }, { type: "text", text: " world" }]) === "hello world", "S4 verbatimSummary concatenates text blocks only");
+ok(compactMemoryTitle("dsh-ltm-gate") === "fact: compact dsh-ltm-gate", "S4 compact title marks fact + project tag");
+
+{
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm" });
+  const sessionEvts = [];
+  const session = {
+    header: { cwd: "/Users/OhanSmit/git/dsh-ltm-gate" },
+    _events: sessionEvts,
+    append(type, data, opts) { sessionEvts.push({ type, data, opts }); },
+  };
+  const summaryText = "Exact compaction body\nkeep paths /tmp/foo and errors verbatim.";
+  await ctx.fire("session/event", session, {
+    type: "compaction/summary",
+    data: {
+      compactionId: "c1",
+      summary: [{ type: "text", text: summaryText }],
+      shadowedSeqs: [1, 2, 3, 4, 5],
+      shadowedTokenCount: 45_000,
+      provider: "deepseek",
+      model: "deepseek-r1",
+      usage: { input_tokens: 8200, output_tokens: 720 },
+    },
+  });
+  ok(ctx._remembered.length === 1, "S4 compaction/summary stores one memory");
+  ok(ctx._remembered[0].title === "fact: compact dsh-ltm-gate", "S4 stored title is fact compact for project");
+  // Content must now start with a metadata header then the verbatim summary
+  const stored = ctx._remembered[0];
+  ok(stored.content.startsWith("[Compact:"), "S4 content starts with metadata header");
+  ok(stored.content.includes("5 events"), "S4 metadata header includes event count");
+  ok(stored.content.includes("tokens freed"), "S4 metadata header includes tokens freed");
+  ok(stored.content.includes("deepseek/deepseek-r1"), "S4 metadata header includes provider/model");
+  ok(stored.content.includes("8200\u2192720 tokens"), "S4 metadata header includes usage cost");
+  ok(stored.content.endsWith(summaryText), "S4 content ends with verbatim summary text");
+  ok(stored.memory_type === "summary", "S4 stored memory_type is summary");
+  // Tags must include model slug
+  ok(stored.tags.includes("project") && stored.tags.includes("dsh-ltm-gate") && stored.tags.includes("session"), "S4 tags include project,name,session");
+  ok(stored.tags.includes("deepseek"), "S4 tags include model provenance slug");
+  // Importance: 6 + floor(45000/20000) = 6+2 = 8
+  ok(stored.importance === 8, "S4 importance scaled by tokens freed (45k -> 8)");
+  // Session notice
+  const sessionEvents = session._events ?? [];
+  ok(sessionEvents.length === 1 && sessionEvents[0].type === "user/message", "S4 notice appended to session after compact store");
+  ok(sessionEvents[0].data?.source?.form === "notice", "S4 notice has form=notice source");
+  ok(typeof sessionEvents[0].data?.source?.summary === "string" && sessionEvents[0].data.source.summary.includes("dsh-ltm-gate"), "S4 notice summary includes project name");
+  await ctx.fire("session/event", session, { type: "user/message", data: {} });
+  ok(ctx._remembered.length === 1, "S4 non-compaction events do not store memories");
+  // Fallback: no metadata fields -> baseline importance=6
+  const ctx2 = makeCtx();
+  apply(ctx2, { serverName: "ltm" });
+  const sess2 = { header: { cwd: "/Users/OhanSmit/git/dsh-ltm-gate" }, append() {} };
+  await ctx2.fire("session/event", sess2, {
+    type: "compaction/summary",
+    data: { compactionId: "c2", summary: [{ type: "text", text: "bare summary" }] },
+  });
+  ok(ctx2._remembered[0].importance === 6, "S4 baseline importance=6 when no tokensFreed");
+  ok(ctx2._remembered[0].content.startsWith("[Compact]") || ctx2._remembered[0].content.startsWith("[Compact:"), "S4 fallback still gets a Compact header");
+}
+
+{
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm", storeOnCompact: false });
+  await ctx.fire("session/event", { header: { cwd: "/tmp/proj" } }, {
+    type: "compaction/summary",
+    data: { summary: [{ type: "text", text: "should not store" }] },
+  });
+  ok(ctx._remembered.length === 0, "S4 storeOnCompact false skips remember");
+}
+
+{
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm" });
+  await ctx.fire("session/event", { header: { cwd: "/tmp/proj" } }, {
+    type: "compaction/summary",
+    data: { summary: [{ type: "text", text: "   " }] },
+  });
+  ok(ctx._remembered.length === 0, "S4 blank summary is not stored");
 }
 
 console.log(pass + " passed, " + fail + " failed");

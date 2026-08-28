@@ -25,6 +25,7 @@ tools are allowed.
 | 2 | `tools/post-execute` | First successful recall opens the gate for that agent, tracked **in process memory** (per agent). After N (default 3) consecutive failed recalls the gate fail-opens so a dead memory server never bricks the agent. |
 | 3 | `systemPrompt` | `ltm:policy` section: the mandatory recall/remember rules. |
 | 4 | `agent/pre-step` | One reminder message per step while the gate is closed. |
+| 5 | `session/event` | On `compaction/summary`, store the summary text **verbatim** via `remember(title, content, memory_type="summary", tags="project,<project>,session", importance=6)`. Title is `fact: compact <project>`. |
 
 `/ltm` reports live gate status in-session.
 
@@ -144,3 +145,4 @@ Keys in the `cordis.patch.yml` insert value:
 | `openAfterFailedRecalls` | `3` | Consecutive failed recalls before fail-open |
 | `prompt` | `full` | `full` (all rules) / `gate` (hide rules once satisfied) / `off` |
 | `project` | *(derived from cwd)* | Tag/project string passed to recall tools |
+| `storeOnCompact` | `true` | When the harness emits `compaction/summary`, store that summary verbatim as `memory_type="summary"` titled `fact: compact <project>`, tags `project,<project>,session`, importance 6 |

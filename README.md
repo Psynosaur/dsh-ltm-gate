@@ -19,6 +19,16 @@ tools are allowed.
 
 ## How it works
 
+### On session start scoped to project current working directory
+<img width="756" height="268" alt="image" src="https://github.com/user-attachments/assets/785171d0-a619-4dfb-b4bc-b393884268c0" />
+
+### and on compact
+
+<img width="806" height="240" alt="image" src="https://github.com/user-attachments/assets/7a109234-cb63-4c15-b4c8-2a7add0bd9e5" />
+
+### by default summary memories are excluded in `get_recent_memories` calls from the `long-term-memory-mcp`
+
+
 | Layer | Hook | Behaviour |
 | --- | --- | --- |
 | 1 | `tools/pre-execute` | Hard deny of every non-LTM tool call while the gate is closed. The `run_code` transport (Code Mode) stays callable so recall remains reachable — no deadlock; its non-LTM sub-dispatches are gated like any other call. |

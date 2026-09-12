@@ -7,7 +7,9 @@ gate was prompt-soft; here it is a `tools/pre-execute` denial, so a
 non-recalled call cannot execute at all.
 
 Cross-platform (macOS / Linux / Windows). No build step and no scripts in
-`package.json` (safe under pnpm >= 10 default build-script blocking).
+`package.json` (safe under pnpm >= 10 default build-script blocking): the
+browser half is hand-written in the client module system's lazy-CJS factory
+format rather than emitted by a bundler.
 
 **What is LTM?** This gate guards a separate memory service, not dsh
 itself: the author's
@@ -120,11 +122,14 @@ directly.
 ## Verify
 
 ```sh
-node _smoke.mjs   # behavioral smoke test (stub ctx; cross-platform)
+node _smoke.mjs         # host half: gate, reminders, compaction storage, settings wiring
+node _schema.test.mjs   # the settings schema against the real schemastery
+node _client.test.mjs   # browser half: module registration, card, staged writes
 ```
 
-After install + host restart: the market page shows the plugin **live** (via
-its bundle patch), and `/ltm` reports gate status in-session.
+After install + host restart: Settings > Plugins > Plugin configuration shows
+the **LTM gate** card, the market page shows the plugin **live** (via its
+bundle patch), and `/ltm` reports gate status in-session.
 
 ## Uninstall
 
@@ -139,9 +144,56 @@ Reconcile drops it from `dsh.profile.bundles`; restart the host.
 | Path | Purpose |
 | --- | --- |
 | `package.json` | Plugin manifest; declares `dsh.bundle.patch` (bundle-layer activation) |
-| `lib/index.js` | The gate itself (host plugin) |
-| `cordis.patch.yml` | Bundle patch: one `insert` row mounting the `ltm-gate` loader entry with its config |
-| `_smoke.mjs` | Behavioral smoke test (runs the gate against a stub ctx) |
+| `lib/index.js` | The gate itself (host plugin): hooks, the memory rules section, and the `ltm-gate` settings namespace |
+| `lib/client.js` | Browser half: the Settings > Plugins card, hand-written in the client module system's lazy-CJS factory format (no bundler) |
+| `cordis.patch.yml` | Bundle patch: one `insert` row mounting the `ltm-gate` loader entry with its config, which is also the settings `base` |
+| `_smoke.mjs` | Host behavioral test (runs the gate against a stub ctx) |
+| `_schema.test.mjs` | Settings-schema test against the real schemastery (catches schema-idiom mistakes at test time, not at boot) |
+| `_client.test.mjs` | Browser-half test (registers the bundle against a fake loader, then drives the card form) |
+
+## Settings panel (web GUI)
+
+A panel needs **both halves**, and this plugin ships both:
+
+* the **host half** (`lib/index.js`) registers the `ltm-gate` settings
+  namespace. The entry config in `cordis.patch.yml` becomes that namespace's
+  composition `base` layer; `$DSH_HOME/settings.yaml` layers the user section
+  on top; schema defaults sit underneath.
+* the **browser half** (`lib/client.js`, declared as `dsh.client` in
+  `package.json`) claims the card slot `settings.plugin.item` under the same
+  key.
+
+Settings > Plugins > **Plugin configuration** renders the card because of that
+pairing: the tab dispatches one card per namespace the Host serves, and a
+served namespace that no browser half claims renders nothing. The **Plugin
+list** tab is a separate, read-only view of the Loader tree.
+
+The card stages edits and writes them only on **Save** — each field through
+the settings scope, fenced with the namespace revision it read, so a form that
+drifted from the document is refused instead of overwriting a concurrent
+change. **Discard** drops the drafts. A field present in the user layer is
+badged **Overridden** and offers **Reset to default**, which clears the
+override so the field re-inherits the composed value.
+
+### Adjustable settings
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `prompt` | `full` / `gate` / `off` | `full` | When the mandatory memory rules reach the system prompt: always, only while the gate is closed, or never |
+| `promptTemplate` | string (optional) | *(built-in policy)* | Replaces the built-in memory rules wholesale. Placeholders `{project}`, `{server}` and `{tools}` are expanded on every render |
+| `serverName` | string | `ltm` | MCP server name; tools are addressed as `mcp__<serverName>__<tool>` |
+| `project` | string (optional) | *(derived from cwd)* | Tag/project string passed to recall tools |
+| `recallTools` | string[] | `["get_recent_memories"]` | Raw MCP tool names whose success satisfies the gate |
+| `allowTools` | string[] | `[]` | Extra tool names allowed while the gate is closed |
+| `openAfterFailedRecalls` | number | `3` | Consecutive failed recalls before fail-open |
+| `storeOnCompact` | boolean | `true` | Store compaction summaries as session memories |
+
+Changing a value takes effect on the running gate immediately: the host half
+watches the namespace and re-resolves the live config on every commit, so no
+restart is needed to *edit*. One restart **is** needed after installing or
+updating the plugin, because the host registration and the browser bundle graph
+are both built at boot.
+
 
 ## Config
 
@@ -156,3 +208,7 @@ Keys in the `cordis.patch.yml` insert value:
 | `prompt` | `full` | `full` (all rules) / `gate` (hide rules once satisfied) / `off` |
 | `project` | *(derived from cwd)* | Tag/project string passed to recall tools |
 | `storeOnCompact` | `true` | When the harness emits `compaction/summary`, store that summary verbatim as `memory_type="summary"` titled `fact: compact <project>`, tags `project,<project>,session`, importance 6 |
+| `promptTemplate` | *(unset)* | Custom memory-rules text; replaces the built-in policy. Supports `{project}`, `{server}` and `{tools}` placeholders |
+
+Every key is also editable at runtime from the settings panel; these values are
+the composition `base` that the user layer overrides.

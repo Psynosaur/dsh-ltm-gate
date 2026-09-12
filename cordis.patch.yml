@@ -1,6 +1,12 @@
 # dsh-ltm-gate bundle patch: hard LTM recall gate for the web profile.
 # One host row; the row name resolves from the profile's own node_modules
-# (installed as a file: dependency).
+# (installed as a file: dependency). The package also declares `dsh.client`,
+# so this same row is what puts the browser half (the Settings > Plugins card)
+# into the client module graph.
+#
+# The config below is the settings `base` layer for the `ltm-gate` namespace:
+# the panel shows these values as the composed defaults, and a user-layer
+# override in $DSH_HOME/settings.yaml wins over them.
 - insert:
     - id: ltm-gate
       name: 'dsh-ltm-gate'

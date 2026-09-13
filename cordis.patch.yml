@@ -1,12 +1,18 @@
 # dsh-ltm-gate bundle patch: hard LTM recall gate for the web profile.
 # One host row; the row name resolves from the profile's own node_modules
 # (installed as a file: dependency). The package also declares `dsh.client`,
-# so this same row is what puts the browser half (the Settings > Plugins card)
+# so this same row is what puts the browser half (both Settings > Plugins cards)
 # into the client module graph.
 #
 # The config below is the settings `base` layer for the `ltm-gate` namespace:
 # the panel shows these values as the composed defaults, and a user-layer
 # override in $DSH_HOME/settings.yaml wins over them.
+#
+# The second card, `mcp-ltm`, configures a SEPARATE loader row - the
+# `@deepseek-ai/dsh-mcp-client` entry that actually connects to the memory
+# server (its id must be `mcp-ltm`). That row's config is the base for the MCP
+# card; the panel projects each save onto the live entry. Nothing to declare
+# here: this plugin only serves the namespace, it does not mount the entry.
 - insert:
     - id: ltm-gate
       name: 'dsh-ltm-gate'
@@ -16,3 +22,8 @@
         allowTools: [todo_write, ask_user_question]
         openAfterFailedRecalls: 3
         prompt: full
+        storeOnCompact: true
+        # project: my-project            # default: derived from the session cwd
+        # rememberTool: remember         # raw MCP tool name for the compaction call
+        # promptTemplate: |-             # replaces the built-in memory rules
+        #   ...

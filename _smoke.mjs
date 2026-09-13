@@ -11,6 +11,40 @@ writeFileSync(join(dir, "node_modules", "@deepseek-ai", "dsh-llm", "package.json
   JSON.stringify({ name: "@deepseek-ai/dsh-llm", type: "module", main: "index.js" }));
 writeFileSync(join(dir, "node_modules", "@deepseek-ai", "dsh-llm", "index.js"),
   "export function createUserMessage(input){ return Object.freeze({ id:'smoke-id', role:'user', ...input }); }\n");
+mkdirSync(join(dir, "node_modules", "@deepseek-ai", "schemastery"), { recursive: true });
+writeFileSync(join(dir, "node_modules", "@deepseek-ai", "schemastery", "package.json"),
+  JSON.stringify({ name: "@deepseek-ai/schemastery", type: "module", main: "index.js" }));
+writeFileSync(join(dir, "node_modules", "@deepseek-ai", "schemastery", "index.js"),
+  `function chain(obj) {
+    obj.min = () => obj;
+    obj.max = () => obj;
+    obj.default = () => obj;
+    obj.optional = () => obj;
+    obj.description = () => obj;
+    obj.validate = () => obj;
+    obj.refine = () => obj;
+    obj.transform = () => obj;
+    obj.catch = () => obj;
+    obj.nullable = () => obj;
+    obj.required = () => obj;
+    return obj;
+  }
+  const mock = {
+    object: (shape) => chain({
+      parse: (v) => v,
+      safeParse: (v) => ({ success: true, data: v }),
+      _shape: shape
+    }),
+    string: () => chain({ parse: (v) => v }),
+    array: (item) => chain({ parse: (v) => v }),
+    natural: () => chain({ parse: (v) => v }),
+    union: (options) => chain({ parse: (v) => v }),
+    const: (val) => chain({ parse: (v) => v }),
+    boolean: () => chain({ parse: (v) => v }),
+    dict: (valueSchema) => chain({ parse: (v) => v })
+  };
+  export default mock;
+`);
 writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
 copyFileSync(SRC, join(dir, "index.js"));
 
@@ -32,21 +66,25 @@ function makeCtx(options = {}) {
   const sections = [];
   const commands = [];
   const remembered = [];
+  const calls = [];
   // storeCompactMemory does initialize -> tools/call via fetch (bypasses
-  // ToolRuntime Code Mode collapse). Stub fetch to handle both calls.
+  // ToolRuntime Code Mode collapse). Stub fetch to handle both calls, and
+  // record the endpoint/headers/tool so the MCP wiring can be asserted.
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     let body;
     try { body = JSON.parse(init && init.body ? init.body : "{}"); } catch { body = {}; }
     if (body.method === "initialize") {
+      calls.push({ url, method: "initialize", headers: (init && init.headers) || {} });
       return {
         ok: true,
         headers: { get: (h) => h === "mcp-session-id" ? "smoke-session-123" : "application/json" },
         text: async () => JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2024-11-05" } }),
       };
     }
-    if (body.method === "tools/call" && body.params && body.params.name === "remember") {
-      remembered.push(body.params.arguments);
+    if (body.method === "tools/call") {
+      calls.push({ url, name: body.params && body.params.name, arguments: body.params && body.params.arguments, headers: (init && init.headers) || {} });
+      if (body.params && body.params.name === "remember") remembered.push(body.params.arguments);
       return {
         ok: true,
         headers: { get: (h) => h === "mcp-session-id" ? "smoke-session-123" : "application/json" },
@@ -58,12 +96,43 @@ function makeCtx(options = {}) {
   const toolsStub = options.tools ?? {
     get(name) { return undefined; },
   };
+  // Settings service stub: one registration record per namespace plus a
+  // per-namespace watch that a test drives through _pushSettings /
+  // _pushMcpSettings. An unset value falls back to that namespace's base,
+  // which is what a real override-free document resolves to.
+  const registrations = [];
+  const settingsListeners = {};
+  let gateSettingsValue = options.settingsValue;
+  let mcpSettingsValue = options.mcpSettings;
+  const settingsService = {
+    register(ns, schema, opts) {
+      registrations.push({ ns, schema, opts });
+      return {
+        get: () => {
+          const override = ns === "mcp-ltm" ? mcpSettingsValue : gateSettingsValue;
+          return override !== undefined ? override : (opts && opts.base);
+        },
+        watch(fn) { (settingsListeners[ns] ??= []).push(fn); },
+      };
+    },
+  };
   return {
     logger: { warn: () => {} },
     tools: toolsStub,
+    settings: options.settings ?? settingsService,
     on(name, fn) { (listeners[name] ??= []).push(fn); },
     systemPrompt: { section(s) { sections.push(s); } },
-    inject(keys, fn) { fn({ commands: { register(c) { commands.push(c); } } }); },
+    inject(keys, fn) {
+      // Cordis waits for a missing service instead of calling the callback:
+      // noSettings models a deployment without a settings provider, and no
+      // loader option models one with no mcp-ltm entry to configure.
+      if (keys.includes("settings") && options.noSettings) return;
+      const provided = {};
+      if (keys.includes("commands")) provided.commands = { register(c) { commands.push(c); } };
+      if (keys.includes("settings")) provided.settings = options.settings ?? settingsService;
+      if (keys.includes("loader") && options.loader) provided.loader = options.loader;
+      fn(provided);
+    },
     async fire(name, ...args) {
       const fns = listeners[name] ?? [];
       let decision;
@@ -74,7 +143,40 @@ function makeCtx(options = {}) {
     _sections: sections,
     _commands: commands,
     _remembered: remembered,
+    _calls: calls,
+    _registrations: registrations,
+    _registrationsFor(ns) { return registrations.filter((r) => r.ns === ns); },
+    _pushSettings(next) {
+      gateSettingsValue = next;
+      for (const fn of settingsListeners["ltm-gate"] ?? []) fn(next, undefined);
+    },
+    _pushMcpSettings(next) {
+      mcpSettingsValue = next;
+      for (const fn of settingsListeners["mcp-ltm"] ?? []) fn(next, undefined);
+    },
     _restoreFetch: () => { globalThis.fetch = origFetch; },
+  };
+}
+
+/**
+ * Stub loader service around one mcp-ltm entry. `visible: false` models the
+ * window in which the include tree has not created the sibling entry yet, so
+ * the entry-init attach path can be exercised.
+ */
+function makeLoader(config, options = {}) {
+  const updates = [];
+  const entry = { id: "include:mcp-ltm", options: { id: "mcp-ltm", config } };
+  return {
+    _entry: entry,
+    _updates: updates,
+    entries() { return options.visible === false ? [] : [entry]; },
+    update(id, next) {
+      if (options.failUpdate) return Promise.reject(new Error("loader refused the update"));
+      updates.push({ id, config: next.config });
+      entry.options = { ...entry.options, config: next.config };
+      return Promise.resolve();
+    },
+    show() { options.visible = true; },
   };
 }
 
@@ -242,6 +344,132 @@ ok(compactMemoryTitle("dsh-ltm-gate") === "fact: compact dsh-ltm-gate", "S4 comp
     data: { summary: [{ type: "text", text: "   " }] },
   });
   ok(ctx._remembered.length === 0, "S4 blank summary is not stored");
+}
+
+// ---------------------------------------------------------------------------
+// S8 - MCP connection namespace (the yaml entry behind the memory tools)
+// ---------------------------------------------------------------------------
+
+const GATE_SETTINGS = { serverName: "ltm", recallTools: ["get_recent_memories"], allowTools: [], openAfterFailedRecalls: 3, prompt: "full", storeOnCompact: true };
+const MCP_ENTRY_CONFIG = { serverName: "ltm", transport: "streamable-http", url: "http://127.0.0.1:8000/mcp" };
+
+{
+  const loader = makeLoader({ ...MCP_ENTRY_CONFIG });
+  const ctx = makeCtx({ loader });
+  apply(ctx, { serverName: "ltm" });
+
+  const mcp = ctx._registrationsFor("mcp-ltm");
+  ok(mcp.length === 1, "S8 the mcp-ltm namespace is served when the entry exists");
+  ok(mcp[0].opts.base.url === "http://127.0.0.1:8000/mcp", "S8 the entry config is the composition base");
+  ok(mcp[0].opts.base.serverName === "ltm" && mcp[0].opts.base.transport === "streamable-http", "S8 the base mirrors the entry's identity");
+  ok(Array.isArray(mcp[0].opts.base.args) && mcp[0].opts.base.args.length === 0 && typeof mcp[0].opts.base.headers === "object", "S8 container keys are materialized so an unchanged value never looks edited");
+  ok(loader._updates.length === 0, "S8 an override-free namespace leaves the running entry alone");
+
+  ctx._pushMcpSettings({
+    transport: "streamable-http", serverName: "ltm", url: "http://10.0.0.5:9000/mcp",
+    headers: { Authorization: "Bearer token" }, args: [], env: {},
+    toolCallTimeoutMs: 15000, failOnStartupError: true,
+    reconnectEnabled: true, reconnectInitialDelayMs: 250, reconnectMaxDelayMs: 5000, reconnectMaxAttempts: 4,
+  });
+  ok(loader._updates.length === 1, "S8 a commit is projected onto the live entry");
+  const applied = loader._updates[0].config;
+  ok(loader._updates[0].id === "include:mcp-ltm", "S8 the projection targets the entry's own (prefixed) id");
+  ok(applied.url === "http://10.0.0.5:9000/mcp" && applied.serverName === "ltm", "S8 the entry takes the new endpoint and keeps its server name");
+  ok(applied.headers.Authorization === "Bearer token", "S8 headers ride the projection");
+  ok(applied.reconnect.enabled === true && applied.reconnect.initialDelayMs === 250 && applied.reconnect.maxDelayMs === 5000 && applied.reconnect.maxAttempts === 4, "S8 every flat reconnect field is nested again");
+  ok(applied.toolCallTimeoutMs === 15000 && applied.failOnStartupError === true, "S8 the timeout and startup policy ride the projection");
+  ok(applied.command === undefined && applied.args === undefined, "S8 only the selected transport's fields are written");
+
+  // The same value twice is a no-op: an unchanged commit must not restart the bridge.
+  ctx._pushMcpSettings({
+    transport: "streamable-http", serverName: "ltm", url: "http://10.0.0.5:9000/mcp",
+    headers: { Authorization: "Bearer token" }, args: [], env: {},
+    toolCallTimeoutMs: 15000, failOnStartupError: true,
+    reconnectEnabled: true, reconnectInitialDelayMs: 250, reconnectMaxDelayMs: 5000, reconnectMaxAttempts: 4,
+  });
+  ok(loader._updates.length === 1, "S8 re-committing the same value does not restart the bridge");
+
+  // Clearing an override is a real change: the entry must move back.
+  ctx._pushMcpSettings({ transport: "streamable-http", serverName: "ltm", url: "http://127.0.0.1:8000/mcp", headers: {}, args: [], env: {} });
+  ok(loader._updates.length === 2 && loader._updates[1].config.url === "http://127.0.0.1:8000/mcp", "S8 clearing an override pushes the base value back to the entry");
+  ok(loader._updates[1].config.reconnect === undefined, "S8 a cleared reconnect block is dropped, not defaulted");
+}
+
+{
+  const loader = makeLoader({ ...MCP_ENTRY_CONFIG });
+  const ctx = makeCtx({ loader });
+  apply(ctx, { serverName: "ltm" });
+  ctx._pushMcpSettings({ transport: "stdio", serverName: "ltm", args: [], env: {}, headers: {} });
+  ok(loader._updates.length === 0, "S8 a stdio value with no command is refused instead of pushed");
+  ctx._pushMcpSettings({ transport: "stdio", serverName: "ltm", command: "python", args: ["-m", "ltm"], env: { LTM_DB: "/data/mem.db" }, headers: {} });
+  ok(loader._updates.length === 1 && loader._updates[0].config.command === "python", "S8 a stdio value is projected with its command");
+  ok(loader._updates[0].config.cwd === "" && loader._updates[0].config.env.LTM_DB === "/data/mem.db", "S8 stdio args, env and cwd ride the projection");
+  ok(loader._updates[0].config.url === undefined, "S8 a stdio projection carries no url");
+}
+
+{
+  const loader = makeLoader({ ...MCP_ENTRY_CONFIG });
+  const ctx = makeCtx({ loader });
+  apply(ctx, { serverName: "ltm", rememberTool: "store_memory" });
+  ok(ctx._registrationsFor("ltm-gate")[0].opts.base.rememberTool === "store_memory", "S8 the gate namespace carries rememberTool in its base");
+
+  ctx._pushMcpSettings({
+    transport: "streamable-http", serverName: "ltm", url: "http://10.0.0.5:9000/mcp",
+    headers: { Authorization: "Bearer token" }, args: [], env: {},
+  });
+  await ctx.fire("session/event", { header: { cwd: "/tmp/proj" } }, {
+    type: "compaction/summary",
+    data: { summary: [{ type: "text", text: "body" }] },
+  });
+  const call = ctx._calls.find((c) => c.name === "store_memory");
+  ok(!!call, "S8 the compaction call uses the configured tool name");
+  ok(call.url === "http://10.0.0.5:9000/mcp", "S8 the compaction call posts to the configured endpoint, not a hardcoded localhost");
+  ok(call.headers.Authorization === "Bearer token", "S8 the compaction call sends the configured headers");
+}
+
+{
+  const loader = makeLoader({ ...MCP_ENTRY_CONFIG });
+  const ctx = makeCtx({ loader });
+  apply(ctx, { serverName: "ltm" });
+  ctx._pushMcpSettings({ transport: "stdio", serverName: "ltm", command: "python", args: [], env: {}, headers: {} });
+  await ctx.fire("session/event", { header: { cwd: "/tmp/proj" } }, {
+    type: "compaction/summary",
+    data: { summary: [{ type: "text", text: "body" }] },
+  });
+  ok(ctx._calls.length === 0, "S8 a stdio bridge gets no direct HTTP compaction call");
+}
+
+{
+  const loader = makeLoader({ ...MCP_ENTRY_CONFIG }, { visible: false });
+  const ctx = makeCtx({ loader });
+  apply(ctx, { serverName: "ltm" });
+  ok(ctx._registrationsFor("mcp-ltm").length === 0, "S8 a not-yet-created entry serves no namespace");
+  loader.show();
+  await ctx.fire("loader/entry-init", loader._entry);
+  ok(ctx._registrationsFor("mcp-ltm").length === 1, "S8 the namespace is served once the entry appears");
+}
+
+{
+  const ctx = makeCtx({ loader: makeLoader({ serverName: "ltm", url: "http://127.0.0.1:8000/mcp" }) });
+  apply(ctx, { serverName: "ltm" });
+  ok(ctx._registrationsFor("mcp-ltm").length === 0, "S8 an entry without a transport serves no namespace");
+}
+
+{
+  // No loader service at all: the gate still works and nothing MCP is served.
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm" });
+  ok(ctx._registrationsFor("mcp-ltm").length === 0, "S8 no loader -> no MCP namespace");
+  ok(ctx._registrationsFor("ltm-gate").length === 1, "S8 no loader -> the gate namespace is still served");
+}
+
+{
+  const loader = makeLoader({ ...MCP_ENTRY_CONFIG }, { failUpdate: true });
+  const ctx = makeCtx({ loader });
+  apply(ctx, { serverName: "ltm" });
+  ctx._pushMcpSettings({ transport: "streamable-http", serverName: "ltm", url: "http://elsewhere/mcp", args: [], env: {}, headers: {} });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  ok(loader._updates.length === 0, "S8 a refused entry update is swallowed instead of breaking activation");
 }
 
 console.log(pass + " passed, " + fail + " failed");

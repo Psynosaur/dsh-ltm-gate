@@ -92,7 +92,8 @@ ok(sanitizeProject("") === "unknown", "sanitizeProject empty -> unknown");
 
   const deny1 = await ctx.fire("tools/pre-execute", { name: "read", agent, parent: undefined }, async () => ({ kind: "allow" }));
   ok(deny1.kind === "deny" && /get_recent_memories/.test(deny1.reason), "S1 non-LTM call denied before recall");
-  ok(/current_project: "llama\.cpp-public"/.test(deny1.reason), "S1 deny message carries project tag from agent cwd");
+  ok(/current_project":"llama\.cpp-public"/.test(deny1.reason), "S1 deny message carries project tag from agent cwd");
+  ok(/"scope":"project"/.test(deny1.reason) && /"detail":"digest"/.test(deny1.reason), "S1 bootstrap recall is scoped + index-first (injection budget)");
 
   const allow1 = await ctx.fire("tools/pre-execute", { name: "mcp__ltm__get_recent_memories", agent }, async () => ({ kind: "allow" }));
   ok(allow1.kind === "allow", "S1 LTM recall tool allowed while gate closed");
@@ -111,11 +112,17 @@ ok(sanitizeProject("") === "unknown", "sanitizeProject empty -> unknown");
   const agent2 = makeAgent();
   const d2 = await ctx.fire("agent/pre-step", { agent: agent2, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [{ id: "m1" }] }));
   ok(d2.kind === "enter" && d2.messages.length === 2 && /LTM recall gate/.test(d2.messages[1].content[0].text), "S1 pre-step injects reminder while unsatisfied");
+  // Session format v4 rejects the retired v3 wrapper ({kind:"plugin"}) with
+  // "format v4 message requires a producer-owned source kind" (see
+  // @deepseek-ai/dsh-session-format-v3-to-v4: source() / producerKind()).
+  ok(d2.messages[1].source?.kind === "plugin:ltm-gate", "S1 reminder source kind is producer-owned, not the retired v3 {kind:'plugin'}");
   const d3 = await ctx.fire("agent/pre-step", { agent, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [{ id: "m1" }] }));
   ok(d3.messages.length === 1, "S1 no reminder once satisfied");
 
   const sec = ctx._sections.find(s => s.name === "ltm:policy");
-  ok(!!sec && sec.text({ agent }).includes("MANDATORY RULES"), "S1 ltm:policy section renders rules");
+  const rulesText = sec ? sec.text({ agent }) : "";
+  ok(!!sec && rulesText.includes("WORKING RULES"), "S1 ltm:policy section renders rules");
+  ok(rulesText.includes("budgeted") && rulesText.includes("file_paths"), "S1 rules teach the budgeted recall + staleness-anchor contract");
   const ltmCmd = ctx._commands.find(c => c.name === "ltm");
   ok(!!ltmCmd, "S1 /ltm command registered");
   ok(!ltmCmd.input || (typeof ltmCmd.input.hint === "string" && ltmCmd.input.hint.trim().length > 0), "S1 /ltm command input passes dsh-commands validation (hint non-empty or absent)");
@@ -209,6 +216,7 @@ ok(compactMemoryTitle("dsh-ltm-gate") === "fact: compact dsh-ltm-gate", "S4 comp
   const sessionEvents = session._events ?? [];
   ok(sessionEvents.length === 1 && sessionEvents[0].type === "user/message", "S4 notice appended to session after compact store");
   ok(sessionEvents[0].data?.source?.form === "notice", "S4 notice has form=notice source");
+  ok(sessionEvents[0].data?.source?.kind === "plugin:ltm-gate", "S4 notice source kind is producer-owned, not the retired v3 {kind:'plugin'}");
   ok(typeof sessionEvents[0].data?.source?.summary === "string" && sessionEvents[0].data.source.summary.includes("dsh-ltm-gate"), "S4 notice summary includes project name");
   await ctx.fire("session/event", session, { type: "user/message", data: {} });
   ok(ctx._remembered.length === 1, "S4 non-compaction events do not store memories");
@@ -242,6 +250,83 @@ ok(compactMemoryTitle("dsh-ltm-gate") === "fact: compact dsh-ltm-gate", "S4 comp
     data: { summary: [{ type: "text", text: "   " }] },
   });
   ok(ctx._remembered.length === 0, "S4 blank summary is not stored");
+}
+
+// --- S5: injection projection + quality-aware gate -------------------------
+{
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm", projectRecall: true, maxRecallChars: 2000 });
+  const payload = JSON.stringify({
+    success: true,
+    data: [
+      { id: "m1", memory_type: "preference", title: "off-project noise", tags: ["SecVisionJetson"], importance: 10, timestamp: "2026-01-01T00:00:00Z", content: "x" },
+      { id: "m4", memory_type: "preference", title: "recent critical", tags: ["unrelated"], importance: 9, timestamp: new Date().toISOString(), content: "w" },
+      { id: "m2", memory_type: "preference", title: "project pref", tags: ["preference", "proj"], importance: 7, content: "y" },
+      { id: "m3", memory_type: "fact", title: "a fact", tags: ["project", "proj"], importance: 8, content: "z" },
+    ],
+  });
+  const agent = { meta: { cwd: "D:/tmp/proj" } };
+  const decision = await ctx.fire(
+    "tools/post-execute",
+    { name: "mcp__ltm__get_recent_memories", agent, arguments: { current_project: "proj" } },
+    { isError: false, content: [{ type: "text", text: payload }] },
+    async () => ({ kind: "accept", content: [{ type: "text", text: payload }] }),
+  );
+  const out = JSON.parse(decision.content[0].text);
+  ok(out.data.length === 3 && out.data.every((item) => item.id !== "m1"), "S5 projection drops stale off-project preferences");
+  ok(out.data.some((item) => item.id === "m4"), "S5 projection keeps recent high-importance preferences");
+  ok(out.projected && out.projected.dropped_preferences === 1, "S5 projection reports what it dropped and keeps JSON valid");
+}
+
+{
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm" });
+  const agent = { meta: { cwd: "D:/tmp/proj" } };
+  await ctx.fire(
+    "tools/post-execute",
+    { name: "mcp__ltm__get_recent_memories", agent, arguments: { current_project: "some-other-project" } },
+    { isError: false },
+    async () => ({ kind: "accept" }),
+  );
+  const denied = await ctx.fire("tools/pre-execute", { name: "read", agent }, async () => ({ kind: "allow" }));
+  ok(denied.kind === "deny", "S5 recall for a different project does not satisfy the gate");
+
+  const ctx2 = makeCtx();
+  apply(ctx2, { serverName: "ltm" });
+  const agent2 = { meta: { cwd: "D:/tmp/proj" } };
+  await ctx2.fire(
+    "tools/post-execute",
+    { name: "mcp__ltm__get_recent_memories", agent: agent2, arguments: { current_project: "proj" } },
+    { isError: false },
+    async () => ({ kind: "accept" }),
+  );
+  const allowed = await ctx2.fire("tools/pre-execute", { name: "read", agent: agent2 }, async () => ({ kind: "allow" }));
+  ok(allowed.kind === "allow", "S5 recall naming the current project satisfies the gate");
+}
+
+// --- S6: store gate ---------------------------------------------------------
+{
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm", storeGate: "remind" });
+  const agent = { meta: { cwd: "D:/tmp/proj" } };
+  await ctx.fire("tools/post-execute", { name: "mcp__ltm__get_recent_memories", agent, arguments: { current_project: "proj" } }, { isError: false }, async () => ({ kind: "accept" }));
+  await ctx.fire("tools/post-execute", { name: "write", agent }, { isError: false }, async () => ({ kind: "accept" }));
+  const step = await ctx.fire("agent/pre-step", { agent, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [] }));
+  ok(step.messages.length === 1 && /changed files/.test(step.messages[0].content[0].text), "S6 reminds after a write with no store");
+  await ctx.fire("tools/post-execute", { name: "mcp__ltm__remember", agent }, { isError: false }, async () => ({ kind: "accept" }));
+  const step2 = await ctx.fire("agent/pre-step", { agent, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [] }));
+  ok(step2.messages.length === 0, "S6 reminder clears once something is stored");
+}
+{
+  const ctx = makeCtx();
+  apply(ctx, { serverName: "ltm", storeGate: "block" });
+  const agent = { meta: { cwd: "D:/tmp/proj" } };
+  await ctx.fire("tools/post-execute", { name: "mcp__ltm__get_recent_memories", agent, arguments: { current_project: "proj" } }, { isError: false }, async () => ({ kind: "accept" }));
+  await ctx.fire("tools/post-execute", { name: "edit", agent }, { isError: false }, async () => ({ kind: "accept" }));
+  const denied = await ctx.fire("tools/pre-execute", { name: "read", agent }, async () => ({ kind: "allow" }));
+  ok(denied.kind === "deny" && /store gate/i.test(denied.reason), "S6 storeGate=block denies non-memory tools after an unstored write");
+  const allowed = await ctx.fire("tools/pre-execute", { name: "mcp__ltm__remember", agent }, async () => ({ kind: "allow" }));
+  ok(allowed.kind === "allow", "S6 store tools stay callable while the store gate blocks");
 }
 
 console.log(pass + " passed, " + fail + " failed");

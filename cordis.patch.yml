@@ -9,4 +9,13 @@
         recallTools: [get_recent_memories]
         allowTools: [todo_write, ask_user_question]
         openAfterFailedRecalls: 3
-        prompt: full
+        # slim = short working rules always; the long bootstrap only while the
+        # gate is closed. Recall itself is index-first and budgeted.
+        prompt: slim
+        recallArgs:
+          limit: 5
+          scope: project
+          detail: digest
+          snippet_chars: 200
+          include_summaries: true   # summaries are the continuity record; digest keeps them cheap
+        compactMaxChars: 4000

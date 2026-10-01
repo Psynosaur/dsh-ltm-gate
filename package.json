@@ -15,7 +15,10 @@
       "patch": "./cordis.patch.yml"
     }
   },
-  "dependencies": {
+  "peerDependencies": {
     "@deepseek-ai/dsh-llm": "*"
+  },
+  "scripts": {
+    "deploy": "node scripts/link-profile.mjs"
   }
 }

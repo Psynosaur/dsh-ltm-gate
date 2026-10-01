@@ -22,7 +22,7 @@ tools are allowed.
 | Layer | Hook | Behaviour |
 | --- | --- | --- |
 | 1 | `tools/pre-execute` | Hard deny of every non-LTM tool call while the gate is closed. The `run_code` transport (Code Mode) stays callable so recall remains reachable — no deadlock; its non-LTM sub-dispatches are gated like any other call. |
-| 2 | `tools/post-execute` | First successful recall opens the gate for that agent, tracked **in process memory** (per agent). After N (default 3) consecutive failed recalls the gate fail-opens so a dead memory server never bricks the agent. |
+| 2 | `tools/post-execute` | First successful recall that names the current project (or asks for a shaped slice) opens the gate for that agent, tracked **in process memory** (per agent). After N (default 3) consecutive failed recalls the gate fail-opens so a dead memory server never bricks the agent. |
 | 3 | `systemPrompt` | `ltm:policy` section: the mandatory recall/remember rules. |
 | 4 | `agent/pre-step` | One reminder message per step while the gate is closed. |
 | 5 | `session/event` | On `compaction/summary`, store the summary text **verbatim** via `remember(title, content, memory_type="summary", tags="project,<project>,session", importance=6)`. Title is `fact: compact <project>`. |
@@ -143,6 +143,12 @@ Keys in the `cordis.patch.yml` insert value:
 | `recallTools` | `["get_recent_memories"]` | Raw MCP tool names (no prefix) whose success satisfies the gate |
 | `allowTools` | `[]` | Extra tool names allowed while the gate is closed |
 | `openAfterFailedRecalls` | `3` | Consecutive failed recalls before fail-open |
-| `prompt` | `full` | `full` (all rules) / `gate` (hide rules once satisfied) / `off` |
+| `prompt` | `full` | `full` (bootstrap + working rules) / `slim` (working rules always, bootstrap only while the gate is closed) / `gate` (full only while closed) / `off` |
 | `project` | *(derived from cwd)* | Tag/project string passed to recall tools |
 | `storeOnCompact` | `true` | When the harness emits `compaction/summary`, store that summary verbatim as `memory_type="summary"` titled `fact: compact <project>`, tags `project,<project>,session`, importance 6 |
+| `recallArgs` | `{limit:5, scope:"project", detail:"digest", snippet_chars:200, include_summaries:true}` | Args merged into the mandatory bootstrap recall. Digest keeps it cheap; raise `detail` to `"full"` for bodies |
+| `compactMaxChars` | `4000` | Cap on the verbatim text stored from a `compaction/summary`; the remainder stays in the session transcript. Also tags the memory `session:<id>` |
+| `projectRecall` | `true` | Post-execute projection: drop preferences that cannot apply here and hold the payload to `maxRecallChars`. The payload stays valid JSON with a `projected` note |
+| `maxRecallChars` | `8000` | Character budget for one projected recall result |
+| `storeGate` | `remind` | After a file-changing turn with nothing stored: `remind` (notice), `block` (deny non-memory tools until something is stored), `off` |
+| `writeTools` | `["write", "edit"]` | Tool names that mark the session dirty for the store gate |

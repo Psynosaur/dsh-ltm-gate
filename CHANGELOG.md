@@ -1,45 +1,5 @@
 # Changelog
 
-All notable changes to **dsh-ltm-gate** are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the plugin uses
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Added
-
-- **Budgeted recall.** `prompt: "slim"` renders the short working rules always and the SESSION START
-  bootstrap only while the gate is closed (`full` keeps the bootstrap in every prompt, `gate` hides the
-  rules once satisfied, `off` disables the section). A `promptTemplate` still replaces the policy
-  wholesale and now wins in every mode.
-- **`recallArgs`** (default `{limit:5, scope:"project", detail:"digest", snippet_chars:200,
-  include_summaries:true}`) is merged into the mandatory bootstrap recall and rendered as JSON in the
-  deny message, the per-step reminder and the bootstrap block - an index instead of every body.
-- **`compactMaxChars`** (default 4000) clips the verbatim recap stored from a `compaction/summary`,
-  keeps a pointer to the transcript, and tags the memory `session:<id>`.
-- **`projectRecall` / `maxRecallChars`** (true / 8000): post-execute projection drops preferences that
-  cannot apply here (not project-tagged, not broad-tagged, not importance >= 9 within 30 days) and holds
-  the payload to a character budget, keeping the JSON valid with a `projected` note.
-- **`storeGate` / `writeTools`** (`remind` / `["write","edit"]`): a file-changing turn that stored
-  nothing produces a reminder, or in `block` mode denies non-memory tools until a store lands.
-- **Quality-aware gate**: a successful recall only opens the gate when its arguments name the current
-  project or deliberately ask for a shaped slice.
-
-### Changed
-
-- The rules text teaches what the budget assumes: cheap digest first, expand only what you need, never
-  print a raw recall payload, `file_paths` required for code facts, search before storing.
-- `cordis.patch.yml` ships `prompt: slim`, `recallArgs`, `compactMaxChars` and `storeOnCompact`.
-- All six new keys are in `settingsSchema` and validated in `resolveConfig`; the Settings card still
-  renders upstream's row set, so they are set through the cordis config or `settings.yaml` today.
-
-### Files
-
-- `lib/index.js` - prompt modes, `recallArgsFor`, projection, quality gate, store gate, clipped
-  compaction storage, on top of the 0.2.0 settings/MCP namespaces.
-- `cordis.patch.yml`, `README.md` (config table), `_smoke.mjs` (86 assertions: S1/S2/S3 plus new S5
-  projection/gate-quality and S6 store-gate blocks).
-
 ## [0.2.0] - 2026-09-13
 
 ### Added
